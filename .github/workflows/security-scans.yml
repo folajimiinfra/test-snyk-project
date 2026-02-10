@@ -47,18 +47,28 @@ jobs:
         run: npm install -g snyk
       - name: Run Snyk SCA Scan
         run: |
-          snyk test --json > snyk-sca.json || true
+          echo "Running Snyk SCA..."
+          snyk test --json --all-projects > snyk-sca.json || true
+          echo "SCA Results:"
+          jq '.vulnerabilities | length' snyk-sca.json || echo "0"
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       - name: Run Snyk Code Scan
         run: |
+          echo "Running Snyk Code..."
           snyk code test --json > snyk-code.json || true
+          echo "Code Results:"
+          jq '.results | length' snyk-code.json || echo "0"
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       - name: Merge Snyk Results
         run: |
           # Combine SCA and Code results into one JSON
+          # We use -s to read both files into an array, then add them together
           jq -s '.[0] * .[1]' snyk-sca.json snyk-code.json > snyk-results.json || cp snyk-sca.json snyk-results.json
+          echo "Combined Snyk Findings:"
+          jq '.vulnerabilities | length' snyk-results.json || echo "No SCA"
+          jq '.results | length' snyk-results.json || echo "No Code"
       - name: Upload Snyk Results
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,11 +103,11 @@ jobs:
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
         continue-on-error: true
       - name: Check SonarQube Quality Gate
+        id: sonarqube-quality-gate
         uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        continue-on-error: true
 
   # 4. Ingestion Job: Merges all results and pushes to CodeFabric
   ingest-to-codefabric:
@@ -114,6 +124,8 @@ jobs:
           if-no-files-found: ignore
       - name: Fetch SonarQube Issues
         run: |
+          echo "Waiting for SonarCloud to finish processing..."
+          sleep 15
           # Fetch from SonarCloud API
           curl -u "${{ secrets.SONAR_TOKEN }}:" \
             "https://sonarcloud.io/api/issues/search?componentKeys=folajimiinfra_test-snyk-project&resolved=false" \
@@ -123,21 +135,25 @@ jobs:
           CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
           
           # Push Snyk
-          if [ -f snyk-results.json ] && [ -s snyk-results.json ]; then
+          if [ -f snyk-results.json ] && [ -s snyk-results.json ] && jq -e '.' snyk-results.json > /dev/null; then
             echo "Pushing Snyk findings..."
             jq -n --slurpfile snyk snyk-results.json \
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > payload.json
             curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @payload.json
+          else
+            echo "Snyk results file missing, empty or invalid JSON"
           fi
           
           # Push SonarQube
-          if [ -f sonar-issues.json ] && [ -s sonar-issues.json ]; then
+          if [ -f sonar-issues.json ] && [ -s sonar-issues.json ] && jq -e '.' sonar-issues.json > /dev/null; then
             echo "Pushing SonarQube findings..."
             jq -n --slurpfile sonar sonar-issues.json \
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > payload.json
             curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @payload.json
+          else
+            echo "SonarQube issues file missing, empty or invalid JSON"
           fi
 
   # 5. Finalize Job: Only runs if EVERYTHING passed (Tests, Coverage, Quality Gate)
