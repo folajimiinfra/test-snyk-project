@@ -10,12 +10,12 @@ jobs:
   security-scans:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
         with:
           fetch-depth: 0
       
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@601291d038541a33c748d2145d609b1f640d2476 # v4
         with:
           node-version: 18
           
@@ -55,7 +55,7 @@ jobs:
 
       # --- SONARQUBE SCAN ---
       - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@v2.0.2
+        uses: sonarsource/sonarqube-scan-action@53c699c7d13072e83c79da6971962863e52b45b2 # v2.0.2
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
