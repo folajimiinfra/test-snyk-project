@@ -26,12 +26,6 @@ jobs:
       - name: Run Snyk SCA Test
         run: |
           snyk test --json > snyk-sca-results.json || true
-          # Check if it's valid JSON and has vulnerabilities
-          if jq -e '.vulnerabilities' snyk-sca-results.json > /dev/null; then
-            echo "SCA vulnerabilities found"
-          else
-            echo "No SCA vulnerabilities found or invalid JSON"
-          fi
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -41,52 +35,41 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
           
-      - name: Push SCA to CodeFabric
+      - name: Push to CodeFabric
         run: |
           CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
-          if [ -s snyk-sca-results.json ]; then
-            jq -n --slurpfile snyk snyk-sca-results.json \
-            --arg sha "${{ github.sha }}" \
-            --arg branch "${{ github.ref_name }}" \
-            '{
-              tool: "snyk",
-              tool_instance_id: "github-actions-sca",
-              scan_type: "SCA",
-              format: "json",
-              tenant_id: "github-tenant",
-              asset_id: "snyk-test-project",
-              commit_sha: $sha,
-              branch: $branch,
-              trigger: "CI",
-              scanner_output: $snyk[0]
-            }' > payload-sca.json
-            
-            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
-              -H "Content-Type: application/json" \
-              -d @payload-sca.json
+          
+          # Initialize combined results
+          echo "{}" > combined-results.json
+          
+          # Add SCA results if they exist and are valid
+          if [ -s snyk-sca-results.json ] && jq -e '.' snyk-sca-results.json > /dev/null; then
+            jq -s '.[0] * .[1]' combined-results.json snyk-sca-results.json > tmp.json && mv tmp.json combined-results.json
+          fi
+          
+          # Add Code results if they exist and are valid
+          if [ -s snyk-code-results.json ] && jq -e '.' snyk-code-results.json > /dev/null; then
+            jq -s '.[0] * .[1]' combined-results.json snyk-code-results.json > tmp.json && mv tmp.json combined-results.json
           fi
 
-      - name: Push Snyk Code to CodeFabric
-        run: |
-          CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
-          if [ -s snyk-code-results.json ]; then
-            jq -n --slurpfile snyk snyk-code-results.json \
-            --arg sha "${{ github.sha }}" \
-            --arg branch "${{ github.ref_name }}" \
-            '{
-              tool: "snyk",
-              tool_instance_id: "github-actions-code",
-              scan_type: "SAST",
-              format: "json",
-              tenant_id: "github-tenant",
-              asset_id: "snyk-test-project",
-              commit_sha: $sha,
-              branch: $branch,
-              trigger: "CI",
-              scanner_output: $snyk[0]
-            }' > payload-code.json
-            
-            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
-              -H "Content-Type: application/json" \
-              -d @payload-code.json
-          fi
+          # Wrap in BYOS payload
+          jq -n --slurpfile snyk combined-results.json \
+          --arg sha "${{ github.sha }}" \
+          --arg branch "${{ github.ref_name }}" \
+          '{
+            tool: "snyk",
+            tool_instance_id: "github-actions-combined",
+            scan_type: "SCA",
+            format: "json",
+            tenant_id: "github-tenant",
+            asset_id: "snyk-test-project",
+            commit_sha: $sha,
+            branch: $branch,
+            trigger: "CI",
+            scanner_output: $snyk[0]
+          }' > payload.json
+          
+          echo "Sending combined payload to $CODEFABRIC_URL..."
+          curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+            -H "Content-Type: application/json" \
+            -d @payload.json
