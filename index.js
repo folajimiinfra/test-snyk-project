@@ -3,9 +3,16 @@ const axios = require('axios');
 const lodash = require('lodash');
 const { exec } = require('child_process');
 const crypto = require('crypto');
+const userRouter = require('./src/routes/user');
 
 const app = express();
 const port = 3000;
+
+app.use(express.json());
+app.use(express.static('public'));
+
+// Use the user router
+app.use('/users', userRouter);
 
 // Vulnerability 1: Hardcoded sensitive information (SAST)
 const DUMMY_API_KEY = "dummy_key_for_testing_purposes_only_12345";
