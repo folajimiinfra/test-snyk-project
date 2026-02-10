@@ -1,0 +1,59 @@
+name: SonarQube to CodeFabric BYOS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  sonarqube-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+          
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        continue-on-error: true
+
+      - name: Fetch SonarQube Issues
+        run: |
+          # We wait a bit for the scan to be processed on the server
+          sleep 10
+          
+          # Use curl to get issues for this project from the SonarQube API
+          # SONAR_PROJECT_KEY is usually defined in sonar-project.properties or as an env var
+          curl -u "${{ secrets.SONAR_TOKEN }}:" \
+            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${{ secrets.SONAR_PROJECT_KEY }}&resolved=false" \
+            > sonar-issues.json
+            
+      - name: Push to CodeFabric BYOS
+        run: |
+          CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
+          
+          # Construct the BYOS payload using jq
+          jq -n --slurpfile sonar sonar-issues.json \
+          --arg sha "${{ github.sha }}" \
+          --arg branch "${{ github.ref_name }}" \
+          '{
+            tool: "sonarqube",
+            tool_instance_id: "github-actions-sonar",
+            scan_type: "SAST",
+            format: "json",
+            tenant_id: "github-tenant",
+            asset_id: "snyk-test-project",
+            commit_sha: $sha,
+            branch: $branch,
+            trigger: "CI",
+            scanner_output: $sonar[0]
+          }' > payload.json
+          
+          echo "Sending SonarQube payload to $CODEFABRIC_URL..."
+          curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+            -H "Content-Type: application/json" \
+            -d @payload.json

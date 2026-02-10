@@ -1,4 +1,11 @@
 node_modules
 snyk-results.json
+snyk-sca-results.json
+snyk-code-results.json
+combined-results.json
+sonar-issues.json
 payload.json
+payload-sca.json
+payload-code.json
 .env
+.scannerwork
