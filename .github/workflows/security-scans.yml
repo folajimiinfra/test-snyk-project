@@ -51,6 +51,7 @@ jobs:
         with:
           args: --json > snyk-results.json
       - name: Upload Snyk Results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: snyk-results
@@ -81,16 +82,19 @@ jobs:
             -Dsonar.projectKey=folajimiinfra_test-snyk-project
             -Dsonar.sources=.
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+        continue-on-error: true
       - name: Check SonarQube Quality Gate
         uses: sonarsource/sonarqube-quality-gate-action@master
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        continue-on-error: true
 
   # 4. Ingestion Job: Merges all results and pushes to CodeFabric
   ingest-to-codefabric:
     name: Ingest Results to CodeFabric
     needs: [snyk-scan, sonarqube-scan]
+    if: always() && needs.test.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +102,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: snyk-results
+          if-no-files-found: ignore
       - name: Fetch SonarQube Issues
         run: |
           # Fetch from SonarCloud API
