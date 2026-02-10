@@ -23,20 +23,22 @@ jobs:
         run: npm install
         
       # --- SNYK SCANS ---
-      - name: Install Snyk CLI
-        run: npm install -g snyk
-        
       - name: Run Snyk SCA Test
-        run: |
-          snyk test --json > snyk-sca-results.json || true
+        uses: snyk/actions/node@master
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --json > snyk-sca-results.json
 
       - name: Run Snyk Code Test
-        run: |
-          snyk code test --json > snyk-code-results.json || true
+        uses: snyk/actions/node@master
+        continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: code test
+          args: --json > snyk-code-results.json
           
       - name: Push Snyk to CodeFabric
         run: |
