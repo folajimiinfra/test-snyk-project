@@ -1,4 +1,4 @@
-name: Security Scans (Snyk & SonarQube)
+name: Security CI/CD Pipeline
 
 on:
   push:
@@ -7,56 +7,70 @@ on:
     branches: [ main ]
 
 jobs:
-  security-scans:
+  # 1. Test Job: Runs tests and enforces coverage threshold
+  test:
+    name: Unit Tests & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run Tests with 80% Coverage Threshold
+        run: |
+          # Enforce 80% coverage on branches, functions, lines, and statements
+          npx jest --coverage --coverageThreshold='{"global":{"branches":80,"functions":80,"lines":80,"statements":80}}'
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  # 2. Snyk Scan Job: Runs only if tests pass
+  snyk-scan:
+    name: Snyk Security Analysis
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+      - name: Snyk SCA & Code Scan
+        uses: snyk/actions/node@master
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --json > snyk-results.json
+      - name: Upload Snyk Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: snyk-results
+          path: snyk-results.json
+
+  # 3. SonarQube Scan Job: Runs only if tests pass
+  sonarqube-scan:
+    name: SonarQube Quality Analysis
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Download Coverage
+        uses: actions/download-artifact@v4
         with:
-          node-version: 20
-          
-      - name: Install dependencies
-        run: npm install
-        
-      # --- SNYK SCANS ---
-      - name: Run Snyk SCA Test
-        uses: snyk/actions/node@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --json > snyk-sca-results.json
-
-      - name: Run Snyk Code Test
-        uses: snyk/actions/node@master
-        continue-on-error: true
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: --json > snyk-code-results.json
-          
-      - name: Push Snyk to CodeFabric
-        run: |
-          CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
-          echo "{}" > combined-snyk.json
-          if [ -s snyk-sca-results.json ] && jq -e '.' snyk-sca-results.json > /dev/null; then
-            jq -s '.[0] * .[1]' combined-snyk.json snyk-sca-results.json > tmp.json && mv tmp.json combined-snyk.json
-          fi
-          if [ -s snyk-code-results.json ] && jq -e '.' snyk-code-results.json > /dev/null; then
-            jq -s '.[0] * .[1]' combined-snyk.json snyk-code-results.json > tmp.json && mv tmp.json combined-snyk.json
-          fi
-          jq -n --slurpfile snyk combined-snyk.json \
-          --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
-          '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > snyk-payload.json
-          curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @snyk-payload.json
-
-      # --- SONARQUBE SCAN ---
-      - name: SonarQube Scan
+          name: coverage-report
+          path: coverage/
+      - name: SonarCloud Scan
         uses: sonarsource/sonarqube-scan-action@v3.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -66,22 +80,46 @@ jobs:
             -Dsonar.organization=folajimiinfra
             -Dsonar.projectKey=folajimiinfra_test-snyk-project
             -Dsonar.sources=.
-        continue-on-error: true
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+      - name: Check SonarQube Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
+  # 4. Ingestion Job: Merges all results and pushes to CodeFabric
+  ingest-to-codefabric:
+    name: Ingest Results to CodeFabric
+    needs: [snyk-scan, sonarqube-scan]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Snyk Results
+        uses: actions/download-artifact@v4
+        with:
+          name: snyk-results
       - name: Fetch SonarQube Issues
         run: |
-          echo "Waiting for SonarQube to process report..."
-          sleep 20
+          # Fetch from SonarCloud API
           curl -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=folajimiinfra_test-snyk-project&resolved=false" \
+            "https://sonarcloud.io/api/issues/search?componentKeys=folajimiinfra_test-snyk-project&resolved=false" \
             > sonar-issues.json
-          echo "SonarQube Issues JSON size: $(wc -c < sonar-issues.json) bytes"
-          jq '.total' sonar-issues.json || echo "Could not parse issues count"
-            
-      - name: Push SonarQube to CodeFabric
+      - name: Push to CodeFabric
         run: |
           CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
-          jq -n --slurpfile sonar sonar-issues.json \
-          --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
-          '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > sonar-payload.json
-          curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @sonar-payload.json
+          
+          # Push Snyk
+          if [ -s snyk-results.json ]; then
+            jq -n --slurpfile snyk snyk-results.json \
+            --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
+            '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > payload.json
+            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @payload.json
+          fi
+          
+          # Push SonarQube
+          if [ -s sonar-issues.json ]; then
+            jq -n --slurpfile sonar sonar-issues.json \
+            --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
+            '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > payload.json
+            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @payload.json
+          fi
