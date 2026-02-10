@@ -61,7 +61,9 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           args: >
-            -Dsonar.organization=${{ secrets.SONAR_ORGANIZATION }}
+            -Dsonar.organization=folajimiinfra
+            -Dsonar.projectKey=folajimiinfra_test-snyk-project
+            -Dsonar.sources=.
         continue-on-error: true
 
       - name: Fetch SonarQube Issues
