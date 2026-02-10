@@ -1,0 +1,92 @@
+name: Snyk to CodeFabric BYOS
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  snyk-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Install Snyk CLI
+        run: npm install -g snyk
+        
+      - name: Run Snyk SCA Test
+        run: |
+          snyk test --json > snyk-sca-results.json || true
+          # Check if it's valid JSON and has vulnerabilities
+          if jq -e '.vulnerabilities' snyk-sca-results.json > /dev/null; then
+            echo "SCA vulnerabilities found"
+          else
+            echo "No SCA vulnerabilities found or invalid JSON"
+          fi
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Run Snyk Code Test
+        run: |
+          snyk code test --json > snyk-code-results.json || true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          
+      - name: Push SCA to CodeFabric
+        run: |
+          CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
+          if [ -s snyk-sca-results.json ]; then
+            jq -n --slurpfile snyk snyk-sca-results.json \
+            --arg sha "${{ github.sha }}" \
+            --arg branch "${{ github.ref_name }}" \
+            '{
+              tool: "snyk",
+              tool_instance_id: "github-actions-sca",
+              scan_type: "SCA",
+              format: "json",
+              tenant_id: "github-tenant",
+              asset_id: "snyk-test-project",
+              commit_sha: $sha,
+              branch: $branch,
+              trigger: "CI",
+              scanner_output: $snyk[0]
+            }' > payload-sca.json
+            
+            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+              -H "Content-Type: application/json" \
+              -d @payload-sca.json
+          fi
+
+      - name: Push Snyk Code to CodeFabric
+        run: |
+          CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
+          if [ -s snyk-code-results.json ]; then
+            jq -n --slurpfile snyk snyk-code-results.json \
+            --arg sha "${{ github.sha }}" \
+            --arg branch "${{ github.ref_name }}" \
+            '{
+              tool: "snyk",
+              tool_instance_id: "github-actions-code",
+              scan_type: "SAST",
+              format: "json",
+              tenant_id: "github-tenant",
+              asset_id: "snyk-test-project",
+              commit_sha: $sha,
+              branch: $branch,
+              trigger: "CI",
+              scanner_output: $snyk[0]
+            }' > payload-code.json
+            
+            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+              -H "Content-Type: application/json" \
+              -d @payload-code.json
+          fi

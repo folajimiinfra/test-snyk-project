@@ -1,0 +1,4 @@
+node_modules
+snyk-results.json
+payload.json
+.env
