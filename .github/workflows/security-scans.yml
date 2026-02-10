@@ -69,7 +69,7 @@ jobs:
           echo "Waiting for SonarQube to process report..."
           sleep 20
           curl -u "${{ secrets.SONAR_TOKEN }}:" \
-            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=${{ secrets.SONAR_PROJECT_KEY }}&resolved=false" \
+            "${{ secrets.SONAR_HOST_URL }}/api/issues/search?componentKeys=folajimiinfra_test-snyk-project&resolved=false" \
             > sonar-issues.json
           echo "SonarQube Issues JSON size: $(wc -c < sonar-issues.json) bytes"
           jq '.total' sonar-issues.json || echo "Could not parse issues count"
