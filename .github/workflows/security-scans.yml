@@ -133,6 +133,7 @@ jobs:
       - name: Push to CodeFabric
         run: |
           CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
+          API_KEY="${{ secrets.CODEFABRIC_API_KEY }}"
           
           # Push Snyk
           if [ -f snyk-results.json ] && [ -s snyk-results.json ] && jq -e '.' snyk-results.json > /dev/null; then
@@ -140,7 +141,10 @@ jobs:
             jq -n --slurpfile snyk snyk-results.json \
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > payload.json
-            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @payload.json
+            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: $API_KEY" \
+              -d @payload.json
           else
             echo "Snyk results file missing, empty or invalid JSON"
           fi
@@ -151,7 +155,10 @@ jobs:
             jq -n --slurpfile sonar sonar-issues.json \
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > payload.json
-            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" -H "Content-Type: application/json" -d @payload.json
+            curl -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: $API_KEY" \
+              -d @payload.json
           else
             echo "SonarQube issues file missing, empty or invalid JSON"
           fi
