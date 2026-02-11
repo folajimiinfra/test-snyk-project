@@ -147,10 +147,12 @@ jobs:
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > payload.json
             
-            curl --fail -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+            response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
               -H "Content-Type: application/json" \
               -H "X-API-Key: $API_KEY" \
-              -d @payload.json -s -o /dev/null
+              -d @payload.json)
+            
+            echo "$response" | jq -r '"Ingestion Success: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
           else
             echo "Snyk results file missing, empty or invalid JSON"
           fi
@@ -162,10 +164,12 @@ jobs:
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > payload.json
             
-            curl --fail -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+            response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
               -H "Content-Type: application/json" \
               -H "X-API-Key: $API_KEY" \
-              -d @payload.json -s -o /dev/null
+              -d @payload.json)
+            
+            echo "$response" | jq -r '"Ingestion Success: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
           else
             echo "SonarQube issues file missing, empty or invalid JSON"
           fi
