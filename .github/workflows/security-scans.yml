@@ -260,6 +260,33 @@ jobs:
           echo "  CodeFabric BYOS Ingestion Summary"
           echo "========================================"
 
+          INGEST_FAILURES=0
+
+          # Helper: push results to CodeFabric BYOS endpoint
+          push_to_codefabric() {
+            local tool_name="$1"
+            local payload_file="$2"
+            local http_code
+            local body
+
+            body=$(curl -s -w "\n%{http_code}" -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: $API_KEY" \
+              -d @"$payload_file")
+
+            http_code=$(echo "$body" | tail -1)
+            response=$(echo "$body" | sed '$d')
+
+            if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              echo "$response" | jq -r '"  ✅ Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"' 2>/dev/null \
+                || echo "  ✅ Ingested ($tool_name) — HTTP $http_code"
+            else
+              echo "  ❌ Failed to ingest $tool_name — HTTP $http_code"
+              echo "  Response: $response" | head -5
+              INGEST_FAILURES=$((INGEST_FAILURES + 1))
+            fi
+          }
+
           # ---- Push Snyk ----
           if [ -f snyk-results.json ] && [ -s snyk-results.json ] && jq -e '.' snyk-results.json > /dev/null 2>&1; then
             echo ""
@@ -271,12 +298,7 @@ jobs:
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > payload.json
 
-            response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
-              -H "Content-Type: application/json" \
-              -H "X-API-Key: $API_KEY" \
-              -d @payload.json)
-
-            echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+            push_to_codefabric "snyk" "payload.json"
           else
             echo "Snyk results file missing, empty or invalid JSON"
           fi
@@ -292,12 +314,7 @@ jobs:
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > payload.json
 
-            response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
-              -H "Content-Type: application/json" \
-              -H "X-API-Key: $API_KEY" \
-              -d @payload.json)
-
-            echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+            push_to_codefabric "sonarqube" "payload.json"
           else
             echo "SonarQube issues file missing, empty or invalid JSON"
           fi
@@ -314,12 +331,7 @@ jobs:
               --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
               '{tool: "veracode", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $veracode[0]}' > payload.json
 
-              response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
-                -H "Content-Type: application/json" \
-                -H "X-API-Key: $API_KEY" \
-                -d @payload.json)
-
-              echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+              push_to_codefabric "veracode" "payload.json"
             else
               echo "  No Veracode flaws to ingest (0 findings)"
             fi
@@ -339,17 +351,17 @@ jobs:
               --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
               '{tool: "semgrep", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $semgrep[0]}' > payload.json
 
-              response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
-                -H "Content-Type: application/json" \
-                -H "X-API-Key: $API_KEY" \
-                -d @payload.json)
-
-              echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+              push_to_codefabric "semgrep" "payload.json"
             else
               echo "  No Semgrep findings to ingest (0 findings)"
             fi
           else
             echo "Semgrep results file missing, empty or invalid JSON"
+          fi
+
+          if [ "$INGEST_FAILURES" -gt 0 ]; then
+            echo ""
+            echo "⚠️  $INGEST_FAILURES ingestion(s) failed — check logs above"
           fi
 
           echo ""
