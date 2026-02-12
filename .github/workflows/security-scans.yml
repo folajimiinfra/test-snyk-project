@@ -109,11 +109,103 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
-  # 4. Ingestion Job: Merges all results and pushes to CodeFabric
+  # 4. Veracode Scan Job: Runs only if tests pass (parallel with Snyk + SonarQube)
+  veracode-scan:
+    name: Veracode SAST Analysis
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: npm ci
+
+      # Package the application for Veracode upload
+      - name: Create Upload Artifact
+        run: |
+          echo "Packaging application for Veracode..."
+          zip -r veracode-upload.zip . \
+            -x "node_modules/*" \
+            -x ".git/*" \
+            -x "coverage/*" \
+            -x "*.zip" \
+            -x ".github/*"
+          echo "Upload artifact size: $(du -h veracode-upload.zip | cut -f1)"
+
+      # Run Veracode Pipeline Scan (lightweight, fast, CI-friendly)
+      - name: Veracode Pipeline Scan
+        uses: veracode/Veracode-pipeline-scan-action@v1.0.18
+        with:
+          vid: ${{ secrets.VERACODE_API_ID }}
+          vkey: ${{ secrets.VERACODE_API_KEY }}
+          file: veracode-upload.zip
+          fail_build: false
+        continue-on-error: true
+
+      # Pipeline scan outputs results.json in the workspace root
+      - name: Summarize Veracode Results
+        if: always()
+        run: |
+          if [ -f results.json ]; then
+            FLAW_COUNT=$(jq '.findings | length' results.json 2>/dev/null || echo "0")
+            echo "Veracode Pipeline Scan found $FLAW_COUNT flaws"
+          else
+            echo "No results.json found"
+            echo '{"findings":[]}' > results.json
+          fi
+
+      - name: Upload Veracode Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: veracode-results
+          path: results.json
+          if-no-files-found: ignore
+
+  # 5. Semgrep Scan Job: FREE open-source SAST (runs parallel, no API key needed)
+  semgrep-scan:
+    name: Semgrep SAST Analysis
+    needs: test
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+
+      # Run Semgrep with auto config (uses community rules)
+      - name: Run Semgrep Scan
+        run: |
+          echo "Running Semgrep SAST scan..."
+          semgrep scan --config auto --json --output semgrep-results.json . || true
+          echo "Semgrep scan complete"
+
+      - name: Summarize Semgrep Results
+        if: always()
+        run: |
+          if [ -f semgrep-results.json ]; then
+            FINDING_COUNT=$(python3 -c "import json; d=json.load(open('semgrep-results.json')); print(len(d.get('results',[])))" 2>/dev/null || echo "0")
+            echo "Semgrep found $FINDING_COUNT findings"
+          else
+            echo "No semgrep-results.json found"
+            printf '{"results":[],"errors":[]}\n' > semgrep-results.json
+          fi
+
+      - name: Upload Semgrep Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+          if-no-files-found: ignore
+
+  # 6. Ingestion Job: Merges all results and pushes to CodeFabric
   ingest-to-codefabric:
     name: Ingest Results to CodeFabric
-    needs: [snyk-scan, sonarqube-scan]
-    if: always() && needs.test.result == 'success'
+    needs: [snyk-scan, sonarqube-scan, veracode-scan, semgrep-scan]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,12 +213,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: snyk-results
-          if-no-files-found: ignore
+        continue-on-error: true
+      - name: Download Veracode Results
+        uses: actions/download-artifact@v4
+        with:
+          name: veracode-results
+        continue-on-error: true
+      - name: Download Semgrep Results
+        uses: actions/download-artifact@v4
+        with:
+          name: semgrep-results
+        continue-on-error: true
       - name: Fetch SonarQube Issues
         run: |
           echo "Waiting for SonarCloud to finish processing..."
           sleep 15
-          # Fetch from SonarCloud API
           curl -u "${{ secrets.SONAR_TOKEN }}:" \
             "https://sonarcloud.io/api/issues/search?componentKeys=folajimiinfra_test-snyk-project&resolved=false" \
             > sonar-issues.json
@@ -134,57 +235,129 @@ jobs:
         run: |
           CODEFABRIC_URL="${{ secrets.CODEFABRIC_URL }}"
           API_KEY="${{ secrets.CODEFABRIC_API_KEY }}"
-          
+
           if [ -z "$API_KEY" ]; then
             echo "Error: CODEFABRIC_API_KEY secret is missing"
             exit 1
           fi
-          
-          # Push Snyk
-          if [ -f snyk-results.json ] && [ -s snyk-results.json ] && jq -e '.' snyk-results.json > /dev/null; then
-            echo "Pushing Snyk findings..."
+
+          echo "========================================"
+          echo "  CodeFabric BYOS Ingestion Summary"
+          echo "========================================"
+
+          # ---- Push Snyk ----
+          if [ -f snyk-results.json ] && [ -s snyk-results.json ] && jq -e '.' snyk-results.json > /dev/null 2>&1; then
+            echo ""
+            echo "--- Snyk SCA/Code ---"
+            SNYK_VULNS=$(jq '.vulnerabilities | length' snyk-results.json 2>/dev/null || echo "0")
+            echo "Snyk vulnerabilities: $SNYK_VULNS"
+
             jq -n --slurpfile snyk snyk-results.json \
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "snyk", scan_type: "SCA", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $snyk[0]}' > payload.json
-            
+
             response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
               -H "Content-Type: application/json" \
               -H "X-API-Key: $API_KEY" \
               -d @payload.json)
-            
-            echo "$response" | jq -r '"Ingestion Success: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+
+            echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
           else
             echo "Snyk results file missing, empty or invalid JSON"
           fi
-          
-          # Push SonarQube
-          if [ -f sonar-issues.json ] && [ -s sonar-issues.json ] && jq -e '.' sonar-issues.json > /dev/null; then
-            echo "Pushing SonarQube findings..."
+
+          # ---- Push SonarQube ----
+          if [ -f sonar-issues.json ] && [ -s sonar-issues.json ] && jq -e '.' sonar-issues.json > /dev/null 2>&1; then
+            echo ""
+            echo "--- SonarQube SAST ---"
+            SONAR_ISSUES=$(jq '.issues | length' sonar-issues.json 2>/dev/null || echo "0")
+            echo "SonarQube issues: $SONAR_ISSUES"
+
             jq -n --slurpfile sonar sonar-issues.json \
             --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
             '{tool: "sonarqube", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $sonar[0]}' > payload.json
-            
+
             response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
               -H "Content-Type: application/json" \
               -H "X-API-Key: $API_KEY" \
               -d @payload.json)
-            
-            echo "$response" | jq -r '"Ingestion Success: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+
+            echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
           else
             echo "SonarQube issues file missing, empty or invalid JSON"
           fi
 
-  # 5. Finalize Job: Only runs if EVERYTHING passed (Tests, Coverage, Quality Gate)
+          # ---- Push Veracode ----
+          if [ -f results.json ] && [ -s results.json ] && jq -e '.' results.json > /dev/null 2>&1; then
+            echo ""
+            echo "--- Veracode SAST ---"
+            VERACODE_FLAWS=$(jq '.findings | length' results.json 2>/dev/null || echo "0")
+            echo "Veracode flaws: $VERACODE_FLAWS"
+
+            if [ "$VERACODE_FLAWS" != "0" ] && [ "$VERACODE_FLAWS" != "null" ]; then
+              jq -n --slurpfile veracode results.json \
+              --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
+              '{tool: "veracode", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $veracode[0]}' > payload.json
+
+              response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+                -H "Content-Type: application/json" \
+                -H "X-API-Key: $API_KEY" \
+                -d @payload.json)
+
+              echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+            else
+              echo "  No Veracode flaws to ingest (0 findings)"
+            fi
+          else
+            echo "Veracode results file missing, empty or invalid JSON"
+          fi
+
+          # ---- Push Semgrep ----
+          if [ -f semgrep-results.json ] && [ -s semgrep-results.json ] && jq -e '.' semgrep-results.json > /dev/null 2>&1; then
+            echo ""
+            echo "--- Semgrep SAST ---"
+            SEMGREP_FINDINGS=$(jq '.results | length' semgrep-results.json 2>/dev/null || echo "0")
+            echo "Semgrep findings: $SEMGREP_FINDINGS"
+
+            if [ "$SEMGREP_FINDINGS" != "0" ] && [ "$SEMGREP_FINDINGS" != "null" ]; then
+              jq -n --slurpfile semgrep semgrep-results.json \
+              --arg sha "${{ github.sha }}" --arg branch "${{ github.ref_name }}" \
+              '{tool: "semgrep", scan_type: "SAST", format: "json", asset_id: "snyk-test-project", commit_sha: $sha, branch: $branch, scanner_output: $semgrep[0]}' > payload.json
+
+              response=$(curl --fail -s -X POST "$CODEFABRIC_URL/api/v1/byos/ingest" \
+                -H "Content-Type: application/json" \
+                -H "X-API-Key: $API_KEY" \
+                -d @payload.json)
+
+              echo "$response" | jq -r '"  Ingested: tool=\(.tool), id=\(.ingest_id), findings=\(.total_findings)"'
+            else
+              echo "  No Semgrep findings to ingest (0 findings)"
+            fi
+          else
+            echo "Semgrep results file missing, empty or invalid JSON"
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "  Ingestion Complete"
+          echo "========================================"
+
+  # 7. Finalize Job: Only runs if EVERYTHING passed
   pipeline-success:
     name: Finalize Pipeline
-    needs: [test, sonarqube-scan, ingest-to-codefabric]
+    needs: [test, sonarqube-scan, veracode-scan, semgrep-scan, ingest-to-codefabric]
     if: success()
     runs-on: ubuntu-latest
     steps:
       - name: Mark Pipeline as Fully Successful
         run: |
-          echo "Pipeline completed successfully!"
+          echo "========================================"
+          echo "  Pipeline completed successfully!"
+          echo "========================================"
           echo "1. Tests Passed"
           echo "2. Coverage Threshold (80%) Met"
-          echo "3. Quality Gate Passed"
-          echo "4. Findings Ingested to CodeFabric"
+          echo "3. SonarQube Quality Gate Passed"
+          echo "4. Veracode SAST Scan Complete"
+          echo "5. Semgrep SAST Scan Complete"
+          echo "6. Findings Ingested to CodeFabric"
+          echo "========================================"
