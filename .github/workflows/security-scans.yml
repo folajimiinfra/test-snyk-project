@@ -135,8 +135,23 @@ jobs:
             -x ".github/*"
           echo "Upload artifact size: $(du -h veracode-upload.zip | cut -f1)"
 
+      # Check if Veracode credentials are available
+      - name: Check Veracode Credentials
+        id: veracode-check
+        run: |
+          if [ -n "$VERACODE_VID" ] && [ -n "$VERACODE_VKEY" ]; then
+            echo "has_creds=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "Veracode credentials not configured — skipping scan"
+          fi
+        env:
+          VERACODE_VID: ${{ secrets.VERACODE_API_ID }}
+          VERACODE_VKEY: ${{ secrets.VERACODE_API_KEY }}
+
       # Run Veracode Pipeline Scan (lightweight, fast, CI-friendly)
       - name: Veracode Pipeline Scan
+        if: steps.veracode-check.outputs.has_creds == 'true'
         uses: veracode/Veracode-pipeline-scan-action@v1.0.18
         with:
           vid: ${{ secrets.VERACODE_API_ID }}
